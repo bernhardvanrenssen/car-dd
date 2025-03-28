@@ -1,0 +1,7 @@
+tensorflow
+streamlit
+pillow
+pycocotools
+numpy
+matplotlib
+scipy
