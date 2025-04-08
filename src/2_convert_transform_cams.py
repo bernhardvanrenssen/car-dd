@@ -103,6 +103,11 @@ def compute_similarity_transformation_from_ground(source_ground, target_ground_c
 def process_point_cloud(input_file, output_prefix, max_height=2.5, horizontal_radius=4.0, color=[0, 0, 1], adjust_ground=True):
     print(f"\nProcessing {input_file} ...")
     pcd = o3d.io.read_point_cloud(input_file)
+    # Option 1: Flip the Y axis of the point cloud to match the desired coordinate system.
+    points = np.asarray(pcd.points)
+    points[:, 1] *= -1  # Flip Y.
+    pcd.points = o3d.utility.Vector3dVector(points)
+    #
     plane_model, inliers = detect_ground_plane(pcd, distance_threshold=0.1, ransac_n=3, num_iterations=1000)
     ground_cloud = pcd.select_by_index(inliers)
     ground_cloud.paint_uniform_color([1, 0, 0])
@@ -179,11 +184,13 @@ def convert_camera_center(qw, qx, qy, qz, tx, ty, tz):
     R_cam = rot.as_matrix()
     t = np.array([tx, ty, tz])
     C = -R_cam.T @ t
+    # Flip the Y coordinate to correct for an upside-down orientation:
+    C[1] = -C[1]
     return C
 
 def process_file_camera_centers(input_file, output_file, transform_matrix=None, ignore_scale=False):
     with open(input_file, 'r') as fin, open(output_file, 'w') as fout:
-        skip_next = False
+        skip_next = False  # Skip POINTS2D lines.
         for line in fin:
             line = line.strip()
             if line.startswith("#") or not line:
@@ -252,6 +259,25 @@ def make_transformation_about_center(T, center):
     T_center_inv[:3, 3] = center
     return T_center_inv @ T @ T_center
 
+def sample_key_cameras(input_file, output_file, num_cameras):
+    # Read the input file and collect non-comment lines.
+    with open(input_file, 'r') as fin:
+        lines = [line.rstrip() for line in fin if line and not line.startswith("#")]
+    total = len(lines)
+    if total == 0:
+        print("No camera lines found in", input_file)
+        return
+    # Compute sampling interval.
+    step = max(total // num_cameras, 1)
+    selected = [lines[i] for i in range(0, total, step)]
+    # Trim to desired number if too many.
+    selected = selected[:num_cameras]
+    with open(output_file, 'w') as fout:
+        fout.write("# Key camera centers sampled evenly\n")
+        for line in selected:
+            fout.write(line + "\n")
+    print(f"Sampled {len(selected)} key camera(s) written to {output_file}")
+
 # ----------------------------
 # Main Function with Argument Parsing
 # ----------------------------
@@ -260,7 +286,7 @@ def main():
         description="Combined script for point cloud processing and COLMAP camera center conversion."
     )
     parser.add_argument("--mode", type=str, choices=["pointcloud", "images", "both"], default="both",
-                        help="Functionality to run: 'pointcloud', 'images', or 'both'.")
+                        help="Functionality: 'pointcloud', 'images', or 'both'.")
     parser.add_argument("--ref", type=str, default="./data/ecosport_kiri.ply",
                         help="Reference point cloud file (ecosport_kiri).")
     parser.add_argument("--colmap", type=str, default="./data/points3D.ply",
@@ -278,9 +304,13 @@ def main():
     parser.add_argument("--ignore_scale", action="store_true",
                         help="If set, ignore the scale component when applying transformation to camera centers.")
     parser.add_argument("--vertical_offset", type=float, default=0.0,
-                        help="Manual vertical offset to add (overrides auto if non-zero).")
-    parser.add_argument("--auto_offset", action="store_true",
-                        help="If set, compute the vertical offset automatically by comparing the original ecosport_kiri.ply bounding box with the processed one.")
+                        help="Manual vertical offset to add (if nonzero, overrides auto).")
+    # Set auto_offset to True by default; allow disabling via --no_auto_offset.
+    parser.add_argument("--auto_offset", dest="auto_offset", action="store_true", help="Automatically compute vertical offset (default).")
+    parser.add_argument("--no_auto_offset", dest="auto_offset", action="store_false", help="Disable automatic vertical offset.")
+    parser.set_defaults(auto_offset=True)
+    parser.add_argument("--cameras", type=int, default=30,
+                        help="Number of key cameras to sample (evenly spaced) from the aligned cameras. Default is 30.")
     
     args = parser.parse_args()
     
@@ -298,19 +328,17 @@ def main():
             T_align = np.eye(4)
             T_align[:3, :3] = R_align_colmap
             T_total = T_sim @ T_align
-            
-            # Apply manual vertical offset if provided
+            # Apply vertical offset.
             if args.vertical_offset != 0.0:
                 print(f"Applying manual vertical offset: {args.vertical_offset}")
                 T_offset = np.eye(4)
-                T_offset[:3, 3] = [0, args.vertical_offset, 0]
+                T_offset[:3, 3] = [0, -args.vertical_offset, 0]  # Negative to move upward.
                 T_total = T_offset @ T_total
             elif args.auto_offset:
-                # First, ensure the reference aligned cloud file exists.
                 ref_aligned_path = "ecosport_kiri_aligned_filtered_common.ply"
                 auto_offset = compute_vertical_offset(args.ref, ref_aligned_path)
                 T_offset = np.eye(4)
-                T_offset[:3, 3] = [0, auto_offset, 0]
+                T_offset[:3, 3] = [0, -0, 0]  # auto_offset - TODO - work on this to fix the Y axis...
                 print(f"Applying auto-computed vertical offset: {auto_offset:.4f}")
                 T_total = T_offset @ T_total
             else:
@@ -325,6 +353,13 @@ def main():
             process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_total_adjusted, ignore_scale=args.ignore_scale)
         else:
             print("No similarity transformation computed; only unaligned camera centers were generated.")
+    
+    # Now sample key cameras from the aligned cameras file.
+    if args.cameras > 0 and os.path.exists(args.images_aligned_output):
+        print(f"Sampling {args.cameras} key cameras from aligned camera file...")
+        sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
+    else:
+        print("Aligned camera file not found or cameras count is zero; skipping key camera sampling.")
 
 if __name__ == "__main__":
     main()
