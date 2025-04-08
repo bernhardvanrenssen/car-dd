@@ -183,7 +183,7 @@ def process_point_cloud(input_file, output_prefix, max_height=2.5, horizontal_ra
 def main():
     # Define your two input files.
     file_ref = "./data/ecosport_kiri.ply"   # Reference: ecosport_kiri (fixed)
-    file_colmap = "./data/sparse_pc.ply"       # COLMAP points3D (to be adjusted)
+    file_colmap = "./data/points3D.ply"       # COLMAP points3D (to be adjusted)
     
     # Process the reference cloud.
     aligned_ref, vehicle_ref, ground_ref, ground_level_ref = process_point_cloud(file_ref, "ecosport_kiri",
