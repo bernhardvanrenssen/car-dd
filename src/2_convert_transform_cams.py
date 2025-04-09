@@ -184,9 +184,12 @@ def convert_camera_center(qw, qx, qy, qz, tx, ty, tz):
     R_cam = rot.as_matrix()
     t = np.array([tx, ty, tz])
     C = -R_cam.T @ t
-    # Flip the Y coordinate to correct for an upside-down orientation:
+    # Flip the Y coordinate (as before)...
     C[1] = -C[1]
+    # ...and also flip the X coordinate.
+    C[0] = -C[0]
     return C
+
 
 def process_file_camera_centers(input_file, output_file, transform_matrix=None, ignore_scale=False):
     with open(input_file, 'r') as fin, open(output_file, 'w') as fout:
