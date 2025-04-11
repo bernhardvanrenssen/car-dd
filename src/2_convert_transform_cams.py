@@ -2,19 +2,22 @@
 import open3d as o3d
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from scipy.spatial.transform import Rotation as R
 import argparse
 import os
 
-# ----------------------------
-# Point Cloud Processing Functions
-# ----------------------------
+DEBUG = True  # Set to True to enable debug prints for the transformation.
+
+# ===================================================
+# ORIGINAL FUNCTIONS FOR POINT CLOUD PROCESSING
+# ===================================================
+
 def detect_ground_plane(pcd, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     plane_model, inliers = pcd.segment_plane(distance_threshold=distance_threshold,
                                                ransac_n=ransac_n,
                                                num_iterations=num_iterations)
-    [a, b, c, d] = plane_model
-    print(f"Detected plane equation: {a:.4f}x + {b:.4f}y + {c:.4f}z + {d:.4f} = 0")
     return plane_model, inliers
 
 def compute_rotation_to_align(normal, target_normal=np.array([0, 1, 0])):
@@ -33,7 +36,8 @@ def compute_rotation_to_align(normal, target_normal=np.array([0, 1, 0])):
 
 def align_point_cloud(pcd, plane_model):
     a, b, c, d = plane_model
-    normal = np.array([a, b, c]) / np.linalg.norm([a, b, c])
+    normal = np.array([a, b, c])
+    normal = normal / np.linalg.norm(normal)
     R_matrix = compute_rotation_to_align(normal, target_normal=np.array([0, 1, 0]))
     pcd.rotate(R_matrix, center=(0, 0, 0))
     return R_matrix
@@ -51,18 +55,15 @@ def segment_vehicle_aligned(pcd, y_ground, max_height=2.5):
     points = np.asarray(pcd.points)
     indices = np.where((points[:, 1] >= (y_ground - max_height)) & (points[:, 1] <= y_ground))[0]
     vehicle_pcd = pcd.select_by_index(indices)
-    print(f"Segmented vehicle: kept {indices.shape[0]} points with y in [{y_ground - max_height:.2f}, {y_ground:.2f}]")
     return vehicle_pcd
 
 def filter_horizontal(pcd, radius=1.0):
     points = np.asarray(pcd.points)
     center_x = np.median(points[:, 0])
     center_z = np.median(points[:, 2])
-    print(f"Horizontal center (x,z): ({center_x:.4f}, {center_z:.4f})")
     horizontal_dist = np.sqrt((points[:, 0] - center_x)**2 + (points[:, 2] - center_z)**2)
     indices = np.where(horizontal_dist <= radius)[0]
     filtered_pcd = pcd.select_by_index(indices)
-    print(f"After horizontal filtering: kept {indices.shape[0]} points within {radius} m")
     return filtered_pcd
 
 def umeyama_alignment(source, target):
@@ -80,8 +81,8 @@ def umeyama_alignment(source, target):
     scale = np.trace(np.diag(D)) / var_src
     t = mu_target - scale * R_matrix @ mu_source
     T = np.eye(4)
-    T[:3, :3] = scale * R_matrix
-    T[:3, 3] = t
+    T[:3, :3] = scale * R_matrix   # s*R
+    T[:3, 3] = t                  # translation vector
     return T, scale, R_matrix, t
 
 def sample_ground_points(ground_cloud, num_points=1000):
@@ -101,132 +102,119 @@ def compute_similarity_transformation_from_ground(source_ground, target_ground_c
     return T, scale, R_matrix, t
 
 def process_point_cloud(input_file, output_prefix, max_height=2.5, horizontal_radius=4.0, color=[0, 0, 1], adjust_ground=True):
-    print(f"\nProcessing {input_file} ...")
     pcd = o3d.io.read_point_cloud(input_file)
-    # Option 1: Flip the Y axis of the point cloud to match the desired coordinate system.
-    points = np.asarray(pcd.points)
-    points[:, 1] *= -1  # Flip Y.
-    pcd.points = o3d.utility.Vector3dVector(points)
-    #
     plane_model, inliers = detect_ground_plane(pcd, distance_threshold=0.1, ransac_n=3, num_iterations=1000)
     ground_cloud = pcd.select_by_index(inliers)
     ground_cloud.paint_uniform_color([1, 0, 0])
     R_align = align_point_cloud(pcd, plane_model)
-    print("Applied rotation matrix to align ground:")
-    print(R_align)
     ground_cloud.rotate(R_align, center=(0, 0, 0))
     rotated_ground_points = np.asarray(ground_cloud.points)
     y_ground_aligned = np.median(rotated_ground_points[:, 1])
-    print(f"Aligned ground level (median y): {y_ground_aligned:.4f}")
     vehicle_pcd = segment_vehicle_aligned(pcd, y_ground_aligned, max_height=max_height)
     vehicle_filtered = filter_horizontal(vehicle_pcd, radius=horizontal_radius)
     vehicle_filtered.paint_uniform_color(color)
     return pcd, vehicle_filtered, ground_cloud, y_ground_aligned, R_align
 
-def process_point_cloud_pipeline(file_ref, file_colmap, max_height, horizontal_radius):
-    _, vehicle_ref, ground_ref, ground_level_ref, _ = process_point_cloud(
-        file_ref, "ecosport_kiri",
-        max_height=max_height,
-        horizontal_radius=horizontal_radius,
-        color=[0, 1, 1],
-        adjust_ground=True)
-    aligned_colmap, vehicle_colmap, ground_colmap, ground_level_colmap, R_align_colmap = process_point_cloud(
-        file_colmap, "points3D",
-        max_height=max_height,
-        horizontal_radius=horizontal_radius,
-        color=[1, 1, 1],
-        adjust_ground=True)
-    print(f"Common ground level (from ecosport_kiri): {ground_level_ref:.4f}")
-    source_ground = sample_ground_points(ground_colmap, num_points=1000)
-    target_ground = sample_ground_points(ground_ref, num_points=1000)
-    T_sim, scale_sim, R_sim, t_sim = compute_similarity_transformation_from_ground(source_ground, ground_ref)
-    print("Computed similarity transformation (from COLMAP to ecosport_kiri):")
-    print(T_sim)
-    print(f"Scale: {scale_sim:.4f}")
-    print("Rotation:")
-    print(R_sim)
-    print("Translation:")
-    print(t_sim)
-    aligned_colmap.transform(T_sim)
-    vehicle_colmap.transform(T_sim)
-    o3d.io.write_point_cloud("points3D_aligned_filtered_common.ply", vehicle_colmap)
-    o3d.io.write_point_cloud("ecosport_kiri_aligned_filtered_common.ply", vehicle_ref)
-    print("Exported points3D_aligned_filtered_common.ply and ecosport_kiri_aligned_filtered_common.ply")
-    np.savetxt("similarity_transformation.txt", T_sim, fmt="%.6f")
-    print("Saved similarity transformation to similarity_transformation.txt")
-    return T_sim, R_align_colmap
+# ===================================================
+# ADDED FUNCTIONS FOR CAMERA CENTER PROCESSING
+# ===================================================
 
-# ----------------------------
-# Automatic Vertical Offset Computation
-# ----------------------------
-def compute_vertical_offset(original_path, aligned_path):
-    if not os.path.exists(original_path):
-        print(f"Original file '{original_path}' not found.")
-        return 0.0
-    if not os.path.exists(aligned_path):
-        print(f"Aligned file '{aligned_path}' not found.")
-        return 0.0
-    orig_cloud = o3d.io.read_point_cloud(original_path)
-    aligned_cloud = o3d.io.read_point_cloud(aligned_path)
-    bbox_orig = orig_cloud.get_axis_aligned_bounding_box()
-    bbox_aligned = aligned_cloud.get_axis_aligned_bounding_box()
-    center_orig = bbox_orig.get_center()
-    center_aligned = bbox_aligned.get_center()
-    vertical_offset = center_orig[1] - center_aligned[1]
-    print(f"Computed automatic vertical offset: {vertical_offset:.4f}")
-    return vertical_offset
-
-# ----------------------------
-# COLMAP Camera Center Conversion Functions
-# ----------------------------
 def convert_camera_center(qw, qx, qy, qz, tx, ty, tz):
+    # Convert COLMAP camera parameters into a camera center.
+    # Compute the rotation matrix from the quaternion then calculate:
+    # C = -R_cam^T * t
+    # Finally, flip X and Y to match ecosport_kiri coordinates.
     rot = R.from_quat([qx, qy, qz, qw])
     R_cam = rot.as_matrix()
     t = np.array([tx, ty, tz])
     C = -R_cam.T @ t
-    # Flip the Y coordinate (as before)...
     C[1] = -C[1]
-    # ...and also flip the X coordinate.
     C[0] = -C[0]
     return C
 
+def auto_cluster_y_values(y_vals):
+    y_arr = np.array(y_vals).reshape(-1, 1)
+    candidate_ks = [2, 3, 4, 5]
+    best_k = None
+    best_score = -1
+    scores = {}
+    for k in candidate_ks:
+        if len(y_arr) < k:
+            continue
+        kmeans = KMeans(n_clusters=k, random_state=42).fit(y_arr)
+        labels = kmeans.labels_
+        if len(set(labels)) < 2:
+            continue
+        score = silhouette_score(y_arr, labels)
+        scores[k] = score
+        if score > best_score:
+            best_score = score
+            best_k = k
+    if 3 in scores and scores[3] >= 0.9 * best_score:
+        best_k = 3
+    if best_k is None:
+        return None, None
+    kmeans = KMeans(n_clusters=best_k, random_state=42).fit(y_arr)
+    best_labels = kmeans.labels_
+    return best_labels, best_k
 
 def process_file_camera_centers(input_file, output_file, transform_matrix=None, ignore_scale=False):
-    with open(input_file, 'r') as fin, open(output_file, 'w') as fout:
-        skip_next = False  # Skip POINTS2D lines.
-        for line in fin:
-            line = line.strip()
-            if line.startswith("#") or not line:
-                fout.write(line + "\n")
-                continue
-            tokens = line.split()
-            if skip_next:
-                skip_next = False
-                continue
-            if len(tokens) < 10:
-                continue
-            image_id = tokens[0]
-            qw = float(tokens[1])
-            qx = float(tokens[2])
-            qy = float(tokens[3])
-            qz = float(tokens[4])
-            tx = float(tokens[5])
-            ty = float(tokens[6])
-            tz = float(tokens[7])
-            camera_id = tokens[8]
-            name = " ".join(tokens[9:])
-            C = convert_camera_center(qw, qx, qy, qz, tx, ty, tz)
-            if transform_matrix is not None:
-                if ignore_scale:
-                    s = np.cbrt(np.linalg.det(transform_matrix[:3, :3]))
-                    R_no_scale = transform_matrix[:3, :3] / s
-                    t_sim = transform_matrix[:3, 3]
-                    C = R_no_scale @ C + t_sim
-                else:
-                    C_hom = np.array([C[0], C[1], C[2], 1.0])
-                    C = (transform_matrix @ C_hom)[:3]
-            fout.write(f"{image_id} {C[0]:.8f} {C[1]:.8f} {C[2]:.8f} {camera_id} {name}\n")
-            skip_next = True
+    cameras = []
+    with open(input_file, 'r') as fin:
+        lines = fin.readlines()
+    skip_next = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#") or not line:
+            continue
+        tokens = line.split()
+        if skip_next:
+            skip_next = False
+            continue
+        if len(tokens) < 10:
+            continue
+        image_id = tokens[0]
+        qw = float(tokens[1])
+        qx = float(tokens[2])
+        qy = float(tokens[3])
+        qz = float(tokens[4])
+        tx = float(tokens[5])
+        ty = float(tokens[6])
+        tz = float(tokens[7])
+        camera_id = tokens[8]
+        name = " ".join(tokens[9:])
+        C = convert_camera_center(qw, qx, qy, qz, tx, ty, tz)
+        if transform_matrix is not None:
+            if ignore_scale:
+                s = np.cbrt(np.linalg.det(transform_matrix[:3, :3]))
+                R_no_scale = transform_matrix[:3, :3] / s
+                t_sim = transform_matrix[:3, 3]
+                C = R_no_scale @ C + t_sim
+            else:
+                C_hom = np.array([C[0], C[1], C[2], 1.0])
+                C = (transform_matrix @ C_hom)[:3]
+            # Note: The axis-flipping after transformation is disabled.
+        cameras.append({
+            "image_id": image_id,
+            "C": C,
+            "camera_id": camera_id,
+            "name": name,
+        })
+        skip_next = True
+    y_vals = [cam["C"][1] for cam in cameras]
+    labels, best_k = auto_cluster_y_values(y_vals)
+    if best_k is None:
+        labels = [-1] * len(cameras)
+    with open(output_file, 'w') as fout:
+        fout.write("# image_id Cx Cy Cz camera_id name cluster_label\n")
+        for cam, label in zip(cameras, labels):
+            C = cam["C"]
+            fout.write(f"{cam['image_id']} {C[0]:.8f} {C[1]:.8f} {C[2]:.8f} {cam['camera_id']} {cam['name']} {label}\n")
+    if DEBUG and transform_matrix is not None:
+        print("Debug: First 3 camera centers after transformation:")
+        for i in range(min(3, len(cameras))):
+            print(f"{cameras[i]['image_id']} {cameras[i]['C']}")
+    return
 
 def compute_mean_camera_center(input_file):
     centers = []
@@ -263,106 +251,105 @@ def make_transformation_about_center(T, center):
     return T_center_inv @ T @ T_center
 
 def sample_key_cameras(input_file, output_file, num_cameras):
-    # Read the input file and collect non-comment lines.
     with open(input_file, 'r') as fin:
         lines = [line.rstrip() for line in fin if line and not line.startswith("#")]
     total = len(lines)
     if total == 0:
-        print("No camera lines found in", input_file)
         return
-    # Compute sampling interval.
     step = max(total // num_cameras, 1)
     selected = [lines[i] for i in range(0, total, step)]
-    # Trim to desired number if too many.
     selected = selected[:num_cameras]
     with open(output_file, 'w') as fout:
         fout.write("# Key camera centers sampled evenly\n")
         for line in selected:
             fout.write(line + "\n")
-    print(f"Sampled {len(selected)} key camera(s) written to {output_file}")
+    return
 
-# ----------------------------
-# Main Function with Argument Parsing
-# ----------------------------
+# ===================================================
+# MAIN FUNCTION
+# ===================================================
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Combined script for point cloud processing and COLMAP camera center conversion."
+        description="Process point clouds to compute a similarity transformation and then export COLMAP camera centers with pass clustering."
     )
-    parser.add_argument("--mode", type=str, choices=["pointcloud", "images", "both"], default="both",
-                        help="Functionality: 'pointcloud', 'images', or 'both'.")
-    parser.add_argument("--ref", type=str, default="./data/ecosport_kiri.ply",
-                        help="Reference point cloud file (ecosport_kiri).")
-    parser.add_argument("--colmap", type=str, default="./data/points3D.ply",
-                        help="COLMAP point cloud file.")
-    parser.add_argument("--max_height", type=float, default=2.5,
-                        help="Max height for vehicle segmentation.")
-    parser.add_argument("--horizontal_radius", type=float, default=4.0,
-                        help="Horizontal filtering radius (meters).")
-    parser.add_argument("--images_input", type=str, default="./data/images.txt",
-                        help="Input COLMAP images.txt file.")
-    parser.add_argument("--images_unaligned_output", type=str, default="images_converted_unaligned.txt",
-                        help="Output file for original camera centers (unaligned).")
-    parser.add_argument("--images_aligned_output", type=str, default="images_converted_aligned.txt",
-                        help="Output file for camera centers after applying transformation.")
-    parser.add_argument("--ignore_scale", action="store_true",
-                        help="If set, ignore the scale component when applying transformation to camera centers.")
-    parser.add_argument("--vertical_offset", type=float, default=0.0,
-                        help="Manual vertical offset to add (if nonzero, overrides auto).")
-    # Set auto_offset to True by default; allow disabling via --no_auto_offset.
-    parser.add_argument("--auto_offset", dest="auto_offset", action="store_true", help="Automatically compute vertical offset (default).")
-    parser.add_argument("--no_auto_offset", dest="auto_offset", action="store_false", help="Disable automatic vertical offset.")
+    parser.add_argument("--mode", type=str, choices=["pointcloud", "images", "both"], default="both")
+    parser.add_argument("--ref", type=str, default="./data/ecosport_kiri.ply")
+    parser.add_argument("--colmap", type=str, default="./data/points3D.ply")
+    parser.add_argument("--max_height", type=float, default=2.5)
+    parser.add_argument("--horizontal_radius", type=float, default=4.0)
+    parser.add_argument("--images_input", type=str, default="./data/images.txt")
+    parser.add_argument("--images_unaligned_output", type=str, default="images_converted_unaligned.txt")
+    parser.add_argument("--images_aligned_output", type=str, default="images_converted_aligned.txt")
+    parser.add_argument("--ignore_scale", action="store_true")
+    parser.add_argument("--vertical_offset", type=float, default=0.0)
+    parser.add_argument("--auto_offset", dest="auto_offset", action="store_true")
+    parser.add_argument("--no_auto_offset", dest="auto_offset", action="store_false")
     parser.set_defaults(auto_offset=True)
-    parser.add_argument("--cameras", type=int, default=30,
-                        help="Number of key cameras to sample (evenly spaced) from the aligned cameras. Default is 30.")
-    
+    parser.add_argument("--cameras", type=int, default=30)
     args = parser.parse_args()
     
     T_sim = None
     R_align_colmap = None
+    
     if args.mode in ["pointcloud", "both"]:
-        print("Running point cloud processing pipeline...")
-        T_sim, R_align_colmap = process_point_cloud_pipeline(args.ref, args.colmap, args.max_height, args.horizontal_radius)
+        _, vehicle_ref, ground_ref, ground_level_ref, _ = process_point_cloud(
+            args.ref, "ecosport_kiri",
+            max_height=args.max_height,
+            horizontal_radius=args.horizontal_radius,
+            color=[0, 1, 1],
+            adjust_ground=True)
+        _, vehicle_colmap, ground_colmap, ground_level_colmap, R_align_colmap = process_point_cloud(
+            args.colmap, "points3D",
+            max_height=args.max_height,
+            horizontal_radius=args.horizontal_radius,
+            color=[1, 1, 1],
+            adjust_ground=True)
+        source_ground = sample_ground_points(ground_colmap, num_points=1000)
+        target_ground = sample_ground_points(ground_ref, num_points=1000)
+        T_sim, scale_sim, R_sim, t_sim = compute_similarity_transformation_from_ground(source_ground, ground_ref)
+        if DEBUG:
+            print("Debug: Similarity Transformation (T_sim):")
+            print(T_sim)
+        # Now incorporate the COLMAP alignment rotation to obtain the full transformation.
+        H = np.eye(4)
+        H[:3, :3] = R_align_colmap
+        T_full = T_sim @ H
+        if DEBUG:
+            print("Debug: Full Transformation (T_full):")
+            print(T_full)
+        aligned_colmap = vehicle_colmap  # Use processed point cloud
+        aligned_colmap.transform(T_full)
+        o3d.io.write_point_cloud("points3D_aligned_filtered_common.ply", aligned_colmap)
+        o3d.io.write_point_cloud("ecosport_kiri_aligned_filtered_common.ply", vehicle_ref)
+        np.savetxt("similarity_transformation.txt", T_full, fmt="%.6f")
     
     if args.mode in ["images", "both"]:
-        print("Processing unaligned camera centers (original)...")
         process_file_camera_centers(args.images_input, args.images_unaligned_output, transform_matrix=None)
-        
         if T_sim is not None and R_align_colmap is not None:
-            T_align = np.eye(4)
-            T_align[:3, :3] = R_align_colmap
-            T_total = T_sim @ T_align
-            # Apply vertical offset.
+            T_total = T_full.copy()
             if args.vertical_offset != 0.0:
-                print(f"Applying manual vertical offset: {args.vertical_offset}")
                 T_offset = np.eye(4)
-                T_offset[:3, 3] = [0, -args.vertical_offset, 0]  # Negative to move upward.
+                T_offset[:3, 3] = [0, -args.vertical_offset, 0]
                 T_total = T_offset @ T_total
             elif args.auto_offset:
-                ref_aligned_path = "ecosport_kiri_aligned_filtered_common.ply"
-                auto_offset = compute_vertical_offset(args.ref, ref_aligned_path)
+                auto_offset = 0.0
                 T_offset = np.eye(4)
-                T_offset[:3, 3] = [0, -0, 0]  # auto_offset - TODO - work on this to fix the Y axis...
-                print(f"Applying auto-computed vertical offset: {auto_offset:.4f}")
+                T_offset[:3, 3] = [0, -auto_offset, 0]
                 T_total = T_offset @ T_total
-            else:
-                print("No vertical offset applied.")
-            
-            mean_center = compute_mean_camera_center(args.images_input)
-            print("Mean camera center (unaligned):", mean_center)
-            T_total_adjusted = make_transformation_about_center(T_total, mean_center)
-            print("Using adjusted total transformation (rotated about center):")
-            print(T_total_adjusted)
-            print("Processing aligned camera centers (applying adjusted total transformation)...")
-            process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_total_adjusted, ignore_scale=args.ignore_scale)
+            # --- Modification: Invert the rotation only ---
+            T_camera = T_total.copy()
+            T_camera[:3, :3] = T_camera[:3, :3].T
+            if DEBUG:
+                print("Debug: Using transformation for cameras (T_camera, with inverted rotation):")
+                print(T_camera)
+            process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_camera, ignore_scale=args.ignore_scale)
         else:
-            print("No similarity transformation computed; only unaligned camera centers were generated.")
+            process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
+
     
-    # Now sample key cameras from the aligned cameras file.
     if args.cameras > 0 and os.path.exists(args.images_aligned_output):
-        print(f"Sampling {args.cameras} key cameras from aligned camera file...")
         sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
-    else:
-        print("Aligned camera file not found or cameras count is zero; skipping key camera sampling.")
 
 if __name__ == "__main__":
     main()
