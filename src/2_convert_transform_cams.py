@@ -128,6 +128,7 @@ def convert_camera_center(qw, qx, qy, qz, tx, ty, tz):
     R_cam = rot.as_matrix()
     t = np.array([tx, ty, tz])
     C = -R_cam.T @ t
+    # UNCOMMENT THE FOLLOWING TO FILP THE Y AND X AXIS>>>>
     # C[1] = -C[1]
     # C[0] = -C[0]
     return C
