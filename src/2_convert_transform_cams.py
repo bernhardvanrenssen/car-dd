@@ -128,8 +128,8 @@ def convert_camera_center(qw, qx, qy, qz, tx, ty, tz):
     R_cam = rot.as_matrix()
     t = np.array([tx, ty, tz])
     C = -R_cam.T @ t
-    C[1] = -C[1]
-    C[0] = -C[0]
+    # C[1] = -C[1]
+    # C[0] = -C[0]
     return C
 
 def auto_cluster_y_values(y_vals):
@@ -292,6 +292,7 @@ def main():
     T_sim = None
     R_align_colmap = None
     
+    # Process point clouds
     if args.mode in ["pointcloud", "both"]:
         _, vehicle_ref, ground_ref, ground_level_ref, _ = process_point_cloud(
             args.ref, "ecosport_kiri",
@@ -311,15 +312,16 @@ def main():
         if DEBUG:
             print("Debug: Similarity Transformation (T_sim):")
             print(T_sim)
-        # Now incorporate the COLMAP alignment rotation to obtain the full transformation.
+        # Compute full transformation for cameras.
         H = np.eye(4)
         H[:3, :3] = R_align_colmap
         T_full = T_sim @ H
         if DEBUG:
             print("Debug: Full Transformation (T_full):")
             print(T_full)
+        # For the point cloud, apply only the similarity transformation (no extra rotation).
         aligned_colmap = vehicle_colmap  # Use processed point cloud
-        aligned_colmap.transform(T_full)
+        aligned_colmap.transform(T_sim)
         o3d.io.write_point_cloud("points3D_aligned_filtered_common.ply", aligned_colmap)
         o3d.io.write_point_cloud("ecosport_kiri_aligned_filtered_common.ply", vehicle_ref)
         np.savetxt("similarity_transformation.txt", T_full, fmt="%.6f")
@@ -337,16 +339,12 @@ def main():
                 T_offset = np.eye(4)
                 T_offset[:3, 3] = [0, -auto_offset, 0]
                 T_total = T_offset @ T_total
-            # --- Modification: Invert the rotation only ---
-            T_camera = T_total.copy()
-            T_camera[:3, :3] = T_camera[:3, :3].T
             if DEBUG:
-                print("Debug: Using transformation for cameras (T_camera, with inverted rotation):")
-                print(T_camera)
-            process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_camera, ignore_scale=args.ignore_scale)
+                print("Debug: Using transformation for cameras (T_total):")
+                print(T_total)
+            process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_total, ignore_scale=args.ignore_scale)
         else:
             process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
-
     
     if args.cameras > 0 and os.path.exists(args.images_aligned_output):
         sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
