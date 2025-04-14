@@ -327,6 +327,7 @@ def main():
         o3d.io.write_point_cloud("ecosport_kiri_aligned_filtered_common.ply", vehicle_ref)
         np.savetxt("similarity_transformation.txt", T_full, fmt="%.6f")
     
+    # KEEP THIS FOR NOT FLIPPING
     if args.mode in ["images", "both"]:
         process_file_camera_centers(args.images_input, args.images_unaligned_output, transform_matrix=None)
         if T_sim is not None and R_align_colmap is not None:
@@ -347,6 +348,32 @@ def main():
         else:
             process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
     
+    # This is the flipped version
+    # if args.mode in ["images", "both"]:
+    #     process_file_camera_centers(args.images_input, args.images_unaligned_output, transform_matrix=None)
+    #     if T_sim is not None and R_align_colmap is not None:
+    #         T_total = T_full.copy()
+    #         if args.vertical_offset != 0.0:
+    #             T_offset = np.eye(4)
+    #             T_offset[:3, 3] = [0, -args.vertical_offset, 0]
+    #             T_total = T_offset @ T_total
+    #         elif args.auto_offset:
+    #             auto_offset = 0.0
+    #             T_offset = np.eye(4)
+    #             T_offset[:3, 3] = [0, -auto_offset, 0]
+    #             T_total = T_offset @ T_total
+
+    #         # Invert the rotation part for the camera centers.
+    #         T_camera = T_total.copy()
+    #         T_camera[:3, :3] = T_camera[:3, :3].T
+            
+    #         if DEBUG:
+    #             print("Debug: Using transformation for cameras (T_camera):")
+    #             print(T_camera)
+    #         process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_camera, ignore_scale=args.ignore_scale)
+    #     else:
+    #         process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
+
     if args.cameras > 0 and os.path.exists(args.images_aligned_output):
         sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
 
