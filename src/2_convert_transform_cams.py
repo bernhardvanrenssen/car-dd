@@ -7,12 +7,163 @@ from sklearn.metrics import silhouette_score
 from scipy.spatial.transform import Rotation as R
 import argparse
 import os
+import random
 
 DEBUG = True  # Set to True to enable debug prints for the transformation.
 
 # ===================================================
 # ORIGINAL FUNCTIONS FOR POINT CLOUD PROCESSING
 # ===================================================
+
+def sample_farthest(input_file, output_file, total_samples):
+    # 1. Read positions and lines
+    cams = []
+    for line in open(input_file):
+        if line.startswith("#") or not line.strip(): continue
+        parts = line.split()
+        Cx, Cy, Cz = map(float, parts[5:8])
+        cams.append(((Cx, Cy, Cz), line.rstrip()))
+
+    pts = np.array([c[0] for c in cams])
+    N   = len(pts)
+    if total_samples >= N:
+        sel = list(range(N))
+    else:
+        # 2. Start with a random camera
+        sel = [ random.randrange(N) ]
+        # 3. Greedily add the farthest next point
+        for _ in range(1, total_samples):
+            # compute distance from each point to nearest selected
+            dists = np.min(
+                np.linalg.norm(pts[:,None,:] - pts[sel][None,:,:], axis=2),
+                axis=1
+            )
+            # exclude already selected
+            dists[sel] = -1
+            nxt = int(np.argmax(dists))
+            sel.append(nxt)
+
+    # 4. Write them out
+    with open(output_file, "w") as fout:
+        fout.write("# Key camera centers via farthest‑point sampling\n")
+        for i in sel:
+            fout.write(cams[i][1] + "\n")
+
+def sample_passwise_2d_fps(input_file, output_file,
+                           total_samples,
+                           center_fraction=0.6):
+    """
+    Reads your aligned images file (with 'Cx Cy Cz ... cluster'),
+    splits into the 3 cluster labels, and does a 2D farthest‑point
+    sampling on (Cx, Cz) in each pass individually.
+    """
+    # 1) read in (Cx,Cy,Cz,cluster,line)
+    cams = []
+    for line in open(input_file):
+        if line.startswith("#") or not line.strip(): continue
+        parts = line.split()
+        Cx, Cy, Cz = map(float, parts[5:8])
+        cluster    = int(parts[-1])
+        cams.append(((Cx, Cz, cluster), line.rstrip()))
+    # separate by pass
+    passes = {}
+    for (Cx, Cz, cl), line in cams:
+        passes.setdefault(cl, []).append((np.array([Cx, Cz]), line))
+
+    # 2) decide how many in each
+    mid_n = int(total_samples * center_fraction)
+    rem   = total_samples - mid_n
+    bot_n = rem // 2
+    top_n = rem - bot_n
+
+    # map cluster labels to roles:
+    # assume you have labels 0,1,2 but you want to know which is middle
+    Ys    = np.array([c[0][1] for c in cams]).reshape(-1, 1)
+    km    = KMeans(n_clusters=3, random_state=0).fit(Ys)
+    centers = km.cluster_centers_.flatten()
+    order   = np.argsort(centers)
+    bottom, middle, top = order
+
+    target_counts = {
+        bottom: bot_n,
+        middle: mid_n,
+        top:    top_n
+    }
+
+    # 3) do 2D‐FPS in each pass
+    selected_lines = []
+    for cl, pts in passes.items():
+        coords = np.stack([p[0] for p in pts], axis=0)
+        lines  = [p[1] for p in pts]
+        want   = target_counts.get(cl, 0)
+        N      = len(coords)
+        if want >= N:
+            # take them all
+            selected = list(range(N))
+        else:
+            # fps in 2D
+            sel = [ random.randrange(N) ]
+            for _ in range(1, want):
+                # distance to nearest already selected
+                dmat = np.linalg.norm(coords[:,None,:] - coords[sel][None,:,:], axis=2)
+                mind = dmat.min(axis=1)
+                mind[sel] = -1    # exclude
+                nxt = int(np.argmax(mind))
+                sel.append(nxt)
+            selected = sel
+
+        selected_lines += [ lines[i] for i in selected ]
+
+    # 4) write out exactly total_samples
+    with open(output_file, "w") as fout:
+        fout.write("# Key cameras via passwise 2D‐FPS\n")
+        for line in selected_lines[:total_samples]:
+            fout.write(line + "\n")
+
+def sample_weighted_by_pass(input_file, output_file, total_samples, center_frac=0.6):
+    """
+    - Clusters cameras into 3 passes by height (Y).
+    - Allocates `center_frac` of samples to the middle pass,
+      and divides the rest equally between top & bottom.
+    """
+    # 1. Read all lines, parse Y (Cy) and keep full lines
+    cams = []
+    for line in open(input_file):
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = line.split()
+        # qw,qx,qy,qz,Cx,Cy,Cz,camId,name,cluster
+        Cy = float(parts[6])
+        cams.append((Cy, line.rstrip()))
+
+    Ys = np.array([c[0] for c in cams]).reshape(-1,1)
+    kmeans = KMeans(n_clusters=3, random_state=0).fit(Ys)
+    labels = kmeans.labels_
+    centers = kmeans.cluster_centers_.flatten()
+    # sort clusters by height
+    order = np.argsort(centers)
+    bottom, middle, top = order
+
+    # 2. Compute how many to draw from each
+    center_n = int(total_samples * center_frac)
+    other_n  = (total_samples - center_n) // 2
+    counts   = {
+        middle: center_n,
+        bottom: other_n,
+        top:    total_samples - center_n - other_n
+    }
+
+    # 3. Randomly sample from each cluster
+    sampled = []
+    for cluster_label, n in counts.items():
+        idxs = [i for i, lab in enumerate(labels) if lab == cluster_label]
+        sampled += random.sample(idxs, min(n, len(idxs)))
+
+    # 4. Write out exactly `total_samples` lines
+    with open(output_file, "w") as fout:
+        fout.write("# Key camera centers sampled by pass weights\n")
+        for i in sampled[:total_samples]:
+            fout.write(cams[i][1] + "\n")
 
 def detect_ground_plane(pcd, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     plane_model, inliers = pcd.segment_plane(distance_threshold=distance_threshold,
@@ -197,6 +348,7 @@ def process_file_camera_centers(input_file, output_file, transform_matrix=None, 
             # Note: The axis-flipping after transformation is disabled.
         cameras.append({
             "image_id": image_id,
+            "qw": qw, "qx": qx, "qy": qy, "qz": qz,
             "C": C,
             "camera_id": camera_id,
             "name": name,
@@ -207,10 +359,16 @@ def process_file_camera_centers(input_file, output_file, transform_matrix=None, 
     if best_k is None:
         labels = [-1] * len(cameras)
     with open(output_file, 'w') as fout:
-        fout.write("# image_id Cx Cy Cz camera_id name cluster_label\n")
+        fout.write("# image_id qw qx qy qz Cx Cy Cz camera_id name cluster_label\n")
         for cam, label in zip(cameras, labels):
-            C = cam["C"]
-            fout.write(f"{cam['image_id']} {C[0]:.8f} {C[1]:.8f} {C[2]:.8f} {cam['camera_id']} {cam['name']} {label}\n")
+            qw, qx, qy, qz = cam["qw"], cam["qx"], cam["qy"], cam["qz"]
+            Cx, Cy, Cz    = cam["C"]
+            fout.write(
+                f"{cam['image_id']} "
+                f"{qw:.8f} {qx:.8f} {qy:.8f} {qz:.8f} "
+                f"{Cx:.8f} {Cy:.8f} {Cz:.8f} "
+                f"{cam['camera_id']} {cam['name']} {label}\n"
+            )
     if DEBUG and transform_matrix is not None:
         print("Debug: First 3 camera centers after transformation:")
         for i in range(min(3, len(cameras))):
@@ -281,7 +439,7 @@ def main():
     parser.add_argument("--horizontal_radius", type=float, default=4.0)
     parser.add_argument("--images_input", type=str, default="./data/images.txt")
     parser.add_argument("--images_unaligned_output", type=str, default="images_converted_unaligned.txt")
-    parser.add_argument("--images_aligned_output", type=str, default="images_converted_aligned.txt")
+    parser.add_argument("--images_aligned_output", type=str, default="images_converted.txt")
     parser.add_argument("--ignore_scale", action="store_true")
     parser.add_argument("--vertical_offset", type=float, default=0.0)
     parser.add_argument("--auto_offset", dest="auto_offset", action="store_true")
@@ -375,7 +533,8 @@ def main():
     #         process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
 
     if args.cameras > 0 and os.path.exists(args.images_aligned_output):
-        sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
+        #sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
+        sample_passwise_2d_fps(args.images_aligned_output, "key_images.txt", args.cameras)
 
 if __name__ == "__main__":
     main()
