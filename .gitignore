@@ -1,7 +1,8 @@
 data/*
 venv/*
 data.rar
-supersplat/
+node_modules/
+#supersplat/
 
 # Ignore Python cache files
 __pycache__/
