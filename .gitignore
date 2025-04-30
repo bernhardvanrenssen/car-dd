@@ -2,6 +2,7 @@ data/*
 venv/*
 data.rar
 node_modules/
+viewer_export/*
 #supersplat/
 
 # Ignore Python cache files

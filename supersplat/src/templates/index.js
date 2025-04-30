@@ -520,7 +520,7 @@ function setupClickToView(app, camera) {
     
     logWithTimestamp("Adding click listener to canvas");
     canvas.addEventListener('click', (event) => {
-        logWithTimestamp("Canvas clicked");
+        logWithTimestamp("Canvas clicked...");
         
         if (!window.cameraData || window.cameraData.length === 0) {
             console.error("No camera data available for click detection");

@@ -78,6 +78,30 @@ class ViewerExportPopup extends Container {
         typeRow.append(typeLabel);
         typeRow.append(typeSelect);
 
+        // version type
+        
+        const versionTypeRow = new Container({
+            class: 'row'
+        });
+        
+        const versionTypeLabel = new Label({
+            class: 'label',
+            text: localize('export.version-type')
+        });
+        
+        const versionTypeSelect = new SelectInput({
+            class: 'select',
+            defaultValue: 'dev',
+            options: [
+                { v: 'dev', t: localize('export.version-dev') },
+                { v: 'client', t: localize('export.version-client') },
+                { v: 'both', t: localize('export.version-both') }
+            ]
+        });
+        
+        versionTypeRow.append(versionTypeLabel);
+        versionTypeRow.append(versionTypeSelect);
+
         // spherical harmonic bands
 
         const bandsRow = new Container({
@@ -201,6 +225,7 @@ class ViewerExportPopup extends Container {
         // content
 
         content.append(typeRow);
+        content.append(versionTypeRow); // Add version type row
         content.append(bandsRow);
         content.append(startRow);
         content.append(animationRow);
@@ -273,6 +298,7 @@ class ViewerExportPopup extends Container {
             animationSelect.disabledOptions = hasPoses ? { } : { track: animationSelect.options[1].t };
             colorPicker.value = [bgClr.r, bgClr.g, bgClr.b];
             fovSlider.value = events.invoke('camera.fov');
+            versionTypeSelect.value = 'dev'; // Default to dev version
         };
 
         this.show = (filename?: string) => {
@@ -341,17 +367,17 @@ class ViewerExportPopup extends Container {
                                 target.push(p.target.x, p.target.y, p.target.z);
                             }
 
-                            animTracks.push({
-                                name: 'cameraAnim',
-                                duration: frames / frameRate,
-                                target: 'camera',
-                                loopMode: 'repeat',
-                                interpolation: 'spline',
-                                keyframes: {
-                                    times,
-                                    values: { position, target }
-                                }
-                            });
+                            // animTracks.push({
+                            //     name: 'cameraAnim',
+                            //     duration: frames / frameRate,
+                            //     target: 'camera',
+                            //     loopMode: 'repeat',
+                            //     interpolation: 'spline',
+                            //     keyframes: {
+                            //         times,
+                            //         values: { position, target }
+                            //     }
+                            // });
 
                             break;
                         }
@@ -379,7 +405,8 @@ class ViewerExportPopup extends Container {
                         type: typeSelect.value,
                         filename: filename && filenameEntry.value,
                         serializeSettings,
-                        experienceSettings
+                        experienceSettings,
+                        versionType: versionTypeSelect.value as 'dev' | 'client' | 'both'
                     });
                 };
             }).finally(() => {

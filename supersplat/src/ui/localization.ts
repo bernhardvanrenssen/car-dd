@@ -385,6 +385,10 @@ const localizeInit = () => {
                     'export.animation': 'Animation',
                     'export.animation-none': 'None',
                     'export.animation-track': 'Track',
+                    'export.version-type': 'Version Type',
+                    'export.version-dev': 'Developer',
+                    'export.version-client': 'Client',
+                    'export.version-both': 'Both',
 
                     // Cursor
                     'cursor.click-to-copy': 'Click to copy',

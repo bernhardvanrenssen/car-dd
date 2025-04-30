@@ -82,7 +82,10 @@ const application = {
                 { src: 'static/images', dest: 'static' },
                 { src: 'static/icons', dest: 'static' },
                 { src: 'static/lib', dest: 'static' },
-                { src: 'static/env/VertebraeHDRI_v1_512.png', dest: 'static/env' }
+                { src: 'static/env/VertebraeHDRI_v1_512.png', dest: 'static/env' },
+                // Add the viewer templates to be copied to dist
+                { src: 'src/templates/viewer-dev.html', dest: 'src/templates' },
+                { src: 'src/templates/viewer-client.html', dest: 'src/templates' }
             ]
         }),
         typescript({
