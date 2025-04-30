@@ -4,7 +4,6 @@ data.rar
 node_modules/
 viewer_export/*
 
-./*.txt
 ./*.ply
 #supersplat/
 
