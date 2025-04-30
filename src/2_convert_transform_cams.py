@@ -165,6 +165,124 @@ def sample_weighted_by_pass(input_file, output_file, total_samples, center_frac=
         for i in sampled[:total_samples]:
             fout.write(cams[i][1] + "\n")
 
+def sample_selective_band(input_file, output_file, total_samples):
+    """
+    Samples cameras from the middle band (if 3 bands exist) or lower band (if 2 bands exist).
+    The selected cameras are spaced as evenly as possible within that band.
+    
+    Args:
+        input_file: Path to the input file containing camera information with cluster labels
+        output_file: Path to save the selected cameras
+        total_samples: Number of cameras to sample
+    """
+    # 1. Read the camera information and extract cluster data
+    cameras = []
+    with open(input_file, 'r') as fin:
+        for line in fin:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) < 11:  # Ensure we have enough parts including the cluster label
+                continue
+            
+            # Extract camera position and cluster
+            Cx, Cy, Cz = map(float, parts[5:8])
+            cluster = int(parts[-1])
+            cameras.append({
+                "pos": (Cx, Cy, Cz),
+                "cluster": cluster,
+                "line": line.rstrip()
+            })
+    
+    if not cameras:
+        print("No cameras found in the input file.")
+        return
+    
+    # 2. Identify unique clusters and their counts
+    clusters = {}
+    for cam in cameras:
+        cluster = cam["cluster"]
+        if cluster not in clusters:
+            clusters[cluster] = []
+        clusters[cluster].append(cam)
+    
+    num_clusters = len(clusters)
+    print(f"Found {num_clusters} clusters")
+    
+    # 3. Determine which cluster to use
+    if num_clusters >= 3:
+        # Use the middle cluster (sort clusters by median Y-coordinate)
+        cluster_heights = []
+        for cluster_id, cluster_cams in clusters.items():
+            median_y = np.median([cam["pos"][1] for cam in cluster_cams])
+            cluster_heights.append((cluster_id, median_y))
+        
+        # Sort by height (Y-coordinate)
+        cluster_heights.sort(key=lambda x: x[1])
+        
+        # Select the middle cluster
+        target_cluster = cluster_heights[len(cluster_heights) // 2][0]
+        print(f"Using middle cluster {target_cluster}")
+    elif num_clusters == 2:
+        # Use the lower cluster (with smaller Y-coordinate)
+        cluster_heights = []
+        for cluster_id, cluster_cams in clusters.items():
+            median_y = np.median([cam["pos"][1] for cam in cluster_cams])
+            cluster_heights.append((cluster_id, median_y))
+        
+        # Sort by height and select the lower one
+        cluster_heights.sort(key=lambda x: x[1])
+        target_cluster = cluster_heights[0][0]
+        print(f"Using lower cluster {target_cluster}")
+    else:
+        # If only one cluster, use it
+        target_cluster = list(clusters.keys())[0]
+        print(f"Using only available cluster {target_cluster}")
+    
+    # 4. Get cameras from the selected cluster
+    selected_cameras = clusters[target_cluster]
+    
+    # 5. Calculate spatial distribution for even sampling
+    # First compute the 2D positions (X,Z) of cameras in the selected cluster
+    positions_2d = np.array([[cam["pos"][0], cam["pos"][2]] for cam in selected_cameras])
+    
+    # Calculate the center of the distribution
+    center = np.mean(positions_2d, axis=0)
+    
+    # Calculate polar angles relative to the center
+    angles = []
+    for pos in positions_2d:
+        dx = pos[0] - center[0]
+        dz = pos[1] - center[1]  # Note: positions_2d[1] is Z coordinate
+        angle = np.arctan2(dz, dx)
+        angles.append(angle)
+    
+    # Pair cameras with their angles
+    cam_angles = [(cam, angle) for cam, angle in zip(selected_cameras, angles)]
+    
+    # Sort by angle for even distribution around the center
+    cam_angles.sort(key=lambda x: x[1])
+    
+    # 6. Select evenly spaced cameras based on their angular distribution
+    selected = []
+    if len(cam_angles) <= total_samples:
+        # If we have fewer cameras than requested, use all of them
+        selected = [cam for cam, _ in cam_angles]
+    else:
+        # Calculate evenly spaced indices
+        step = len(cam_angles) / total_samples
+        indices = [int(i * step) for i in range(total_samples)]
+        selected = [cam_angles[i][0] for i in indices]
+    
+    # 7. Write the selected cameras to the output file
+    with open(output_file, "w") as fout:
+        fout.write(f"# Key cameras from {'middle' if num_clusters >= 3 else 'lower'} band, evenly spaced\n")
+        for cam in selected:
+            fout.write(cam["line"] + "\n")
+    
+    print(f"Selected {len(selected)} cameras from cluster {target_cluster}")
+    return
+
 def detect_ground_plane(pcd, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     plane_model, inliers = pcd.segment_plane(distance_threshold=distance_threshold,
                                                ransac_n=ransac_n,
@@ -446,6 +564,7 @@ def main():
     parser.add_argument("--no_auto_offset", dest="auto_offset", action="store_false")
     parser.set_defaults(auto_offset=True)
     parser.add_argument("--cameras", type=int, default=30)
+    parser.add_argument("--sampling", type=str, choices=["fps", "passwise", "weighted", "selective_band"], default="selective_band")
     args = parser.parse_args()
     
     T_sim = None
@@ -506,35 +625,18 @@ def main():
         else:
             process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
     
-    # This is the flipped version
-    # if args.mode in ["images", "both"]:
-    #     process_file_camera_centers(args.images_input, args.images_unaligned_output, transform_matrix=None)
-    #     if T_sim is not None and R_align_colmap is not None:
-    #         T_total = T_full.copy()
-    #         if args.vertical_offset != 0.0:
-    #             T_offset = np.eye(4)
-    #             T_offset[:3, 3] = [0, -args.vertical_offset, 0]
-    #             T_total = T_offset @ T_total
-    #         elif args.auto_offset:
-    #             auto_offset = 0.0
-    #             T_offset = np.eye(4)
-    #             T_offset[:3, 3] = [0, -auto_offset, 0]
-    #             T_total = T_offset @ T_total
-
-    #         # Invert the rotation part for the camera centers.
-    #         T_camera = T_total.copy()
-    #         T_camera[:3, :3] = T_camera[:3, :3].T
-            
-    #         if DEBUG:
-    #             print("Debug: Using transformation for cameras (T_camera):")
-    #             print(T_camera)
-    #         process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=T_camera, ignore_scale=args.ignore_scale)
-    #     else:
-    #         process_file_camera_centers(args.images_input, args.images_aligned_output, transform_matrix=None)
-
+    # Apply sampling method based on user choice
     if args.cameras > 0 and os.path.exists(args.images_aligned_output):
-        #sample_key_cameras(args.images_aligned_output, "key_images.txt", args.cameras)
-        sample_passwise_2d_fps(args.images_aligned_output, "key_images.txt", args.cameras)
+        if args.sampling == "fps":
+            sample_farthest(args.images_aligned_output, "key_images.txt", args.cameras)
+        elif args.sampling == "passwise":
+            sample_passwise_2d_fps(args.images_aligned_output, "key_images.txt", args.cameras)
+        elif args.sampling == "weighted":
+            sample_weighted_by_pass(args.images_aligned_output, "key_images.txt", args.cameras)
+        elif args.sampling == "selective_band":
+            sample_selective_band(args.images_aligned_output, "key_images.txt", args.cameras)
+        else:
+            print(f"Unknown sampling method: {args.sampling}")
 
 if __name__ == "__main__":
     main()
